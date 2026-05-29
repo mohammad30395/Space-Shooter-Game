@@ -7,7 +7,10 @@ const PLAYER_SPEED = 330;
 const POINTER_SPEED = 620;
 const BULLET_SPEED = 620;
 const BULLET_COOLDOWN = 170;
-const MAX_HEALTH = 3;
+const ENEMY_BULLET_SPEED = 230;
+const ENEMY_BULLET_SIZE = 8;
+const ENEMY_SHOT_COOLDOWN = 1500;
+const MAX_HEALTH = 6;
 
 export class SpaceShooterEngine {
   constructor(canvas, { levelConfig, playground, sound, onHudChange, onFinish }) {
@@ -43,6 +46,7 @@ export class SpaceShooterEngine {
       spawnTimer: 0,
       lastShotAt: 0,
       bullets: [],
+      enemyBullets: [],
       enemies: [],
       particles: [],
       bossSpawned: false,
@@ -199,6 +203,7 @@ export class SpaceShooterEngine {
     }
 
     this.updateBullets(delta);
+    this.updateEnemyBullets(delta);
     this.spawnEnemies(delta);
     this.updateEnemies(delta);
     this.updateParticles(delta);
@@ -265,36 +270,52 @@ export class SpaceShooterEngine {
 
   spawnEnemies(delta) {
     const config = this.levelConfig;
+    const maxEnemyPlanes = config.enemyPlaneCount ?? 1;
+    const activeEnemyPlanes = this.state.enemies.length;
     this.state.spawnTimer += delta * 1000;
 
     if (config.boss && !this.state.bossSpawned && (this.state.score >= config.targetScore * 0.45 || this.state.elapsed > 16)) {
+      if (activeEnemyPlanes >= maxEnemyPlanes) {
+        const regularEnemyIndex = this.state.enemies.findIndex((enemy) => enemy.type !== "boss");
+        if (regularEnemyIndex >= 0) {
+          this.state.enemies.splice(regularEnemyIndex, 1);
+        }
+      }
       this.spawnBoss();
       return;
     }
 
-    if (this.state.spawnTimer < config.enemySpawnRate) return;
+    if (activeEnemyPlanes >= maxEnemyPlanes || this.state.spawnTimer < config.enemySpawnRate) return;
 
     this.state.spawnTimer = 0;
     this.spawnEnemy();
   }
 
   spawnEnemy() {
-    const size = randomBetween(28, 44);
-    const health = this.levelConfig.enemyHealth;
-    const speed = this.levelConfig.enemySpeed * randomBetween(42, 58);
+    const width = randomBetween(42, 54);
+    const height = width * 1.04;
+    const health = Math.max(2, this.levelConfig.enemyHealth + 1);
+    const speed = this.levelConfig.enemySpeed * randomBetween(28, 42);
+    const targetY = randomBetween(38, Math.min(this.height * 0.34, 178));
+    const now = performance.now();
 
     this.state.enemies.push({
       type: "enemy",
-      x: randomBetween(12, this.width - size - 12),
-      y: -size - 10,
-      width: size,
-      height: size,
+      x: randomBetween(14, this.width - width - 14),
+      y: -height - 10,
+      width,
+      height,
       health,
       maxHealth: health,
       speed,
-      drift: randomBetween(-18, 18),
-      points: 100 + health * 35,
-      rotation: randomBetween(0, Math.PI)
+      targetY,
+      drift: randomBetween(-36, 36),
+      phase: randomBetween(0, Math.PI * 2),
+      shotTimer: randomBetween(0, ENEMY_SHOT_COOLDOWN * 0.8),
+      shotCooldown: Math.max(560, ENEMY_SHOT_COOLDOWN - this.levelConfig.level * 85 + randomBetween(-130, 180)),
+      accuracy: this.levelConfig.enemyAccuracy ?? 0.5,
+      points: 120 + health * 45,
+      enteredAt: now
     });
   }
 
@@ -314,6 +335,9 @@ export class SpaceShooterEngine {
       maxHealth: health,
       speed: 18,
       drift: 36,
+      shotTimer: 0,
+      shotCooldown: 520,
+      accuracy: 0.9,
       points: 1200,
       rotation: 0
     });
@@ -324,19 +348,71 @@ export class SpaceShooterEngine {
       if (enemy.type === "boss") {
         enemy.x += Math.sin(this.state.elapsed * 1.5) * enemy.drift * delta;
         enemy.x = clamp(enemy.x, 12, this.width - enemy.width - 12);
+        this.updateEnemyShooting(enemy, delta);
         continue;
       }
 
-      enemy.y += enemy.speed * delta;
-      enemy.x += enemy.drift * delta;
-      enemy.rotation += delta * 1.5;
-
-      if (enemy.x < 8 || enemy.x + enemy.width > this.width - 8) {
-        enemy.drift *= -1;
+      if (enemy.y < enemy.targetY) {
+        enemy.y += enemy.speed * delta;
+      } else {
+        enemy.y = enemy.targetY + Math.sin(this.state.elapsed * 1.7 + enemy.phase) * 10;
+        enemy.x += enemy.drift * delta;
       }
+
+      if (enemy.x < 10 || enemy.x + enemy.width > this.width - 10) {
+        enemy.drift *= -1;
+        enemy.x = clamp(enemy.x, 10, this.width - enemy.width - 10);
+      }
+
+      this.updateEnemyShooting(enemy, delta);
     }
 
     this.state.enemies = this.state.enemies.filter((enemy) => enemy.type === "boss" || enemy.y < this.height + 60);
+  }
+
+  updateEnemyShooting(enemy, delta) {
+    if (enemy.y < 0 || this.state.finished) return;
+
+    enemy.shotTimer += delta * 1000;
+    if (enemy.shotTimer < enemy.shotCooldown) return;
+
+    enemy.shotTimer = 0;
+    enemy.shotCooldown = Math.max(460, ENEMY_SHOT_COOLDOWN - this.levelConfig.level * 85 + randomBetween(-150, 170));
+    this.enemyShoot(enemy);
+  }
+
+  enemyShoot(enemy) {
+    const player = this.state.player;
+    const startX = enemy.x + enemy.width / 2;
+    const startY = enemy.y + enemy.height + 6;
+    const targetError = (1 - clamp(enemy.accuracy, 0.1, 0.98)) * this.width * 0.72;
+    const targetX = player.x + player.width / 2 + randomBetween(-targetError, targetError);
+    const targetY = player.y + player.height / 2 + randomBetween(-targetError * 0.32, targetError * 0.32);
+    const deltaX = targetX - startX;
+    const deltaY = targetY - startY;
+    const distance = Math.max(1, Math.hypot(deltaX, deltaY));
+    const speed = ENEMY_BULLET_SPEED + this.levelConfig.level * 18;
+
+    this.state.enemyBullets.push({
+      x: startX - ENEMY_BULLET_SIZE / 2,
+      y: startY,
+      width: ENEMY_BULLET_SIZE,
+      height: ENEMY_BULLET_SIZE * 1.45,
+      vx: (deltaX / distance) * speed,
+      vy: (deltaY / distance) * speed,
+      damage: 1
+    });
+    this.sound?.enemyShoot?.();
+  }
+
+  updateEnemyBullets(delta) {
+    this.state.enemyBullets = this.state.enemyBullets
+      .map((bullet) => ({
+        ...bullet,
+        x: bullet.x + bullet.vx * delta,
+        y: bullet.y + bullet.vy * delta
+      }))
+      .filter((bullet) => bullet.y < this.height + 32 && bullet.y > -32 && bullet.x > -32 && bullet.x < this.width + 32);
   }
 
   updateParticles(delta) {
@@ -381,6 +457,18 @@ export class SpaceShooterEngine {
     this.state.enemies = this.state.enemies.filter((_, index) => !enemiesToRemove.has(index));
 
     const player = this.state.player;
+    const enemyBulletsToRemove = new Set();
+
+    this.state.enemyBullets.forEach((bullet, index) => {
+      if (!rectsOverlap(player, bullet)) return;
+      enemyBulletsToRemove.add(index);
+      this.state.health -= bullet.damage;
+      this.sound?.damage?.();
+      this.createBurst(bullet.x + bullet.width / 2, bullet.y + bullet.height / 2, "#fb7185", 10);
+    });
+
+    this.state.enemyBullets = this.state.enemyBullets.filter((_, index) => !enemyBulletsToRemove.has(index));
+
     const collidedEnemies = new Set();
 
     this.state.enemies.forEach((enemy, index) => {
@@ -463,6 +551,7 @@ export class SpaceShooterEngine {
     ctx.clearRect(0, 0, this.width, this.height);
     this.drawBackground(ctx);
     this.drawBullets(ctx);
+    this.drawEnemyBullets(ctx);
     this.drawEnemies(ctx);
     this.drawPlayer(ctx);
     this.drawParticles(ctx);
@@ -515,6 +604,7 @@ export class SpaceShooterEngine {
     ctx.fillStyle = "#fef08a";
     ctx.fillRect(-5, player.height / 2 - 3, 10, 10);
     ctx.restore();
+    this.drawHealthBar(ctx, player.x, player.y + player.height + 8, player.width, this.state.health / this.state.maxHealth);
   }
 
   drawBullets(ctx) {
@@ -524,6 +614,27 @@ export class SpaceShooterEngine {
     ctx.shadowColor = this.playground.colors.bullet;
     for (const bullet of this.state.bullets) {
       ctx.fillRect(bullet.x, bullet.y, bullet.width, bullet.height);
+    }
+    ctx.restore();
+  }
+
+  drawEnemyBullets(ctx) {
+    ctx.save();
+    ctx.fillStyle = "#fb7185";
+    ctx.shadowBlur = 14;
+    ctx.shadowColor = "#fb7185";
+    for (const bullet of this.state.enemyBullets) {
+      ctx.beginPath();
+      ctx.ellipse(
+        bullet.x + bullet.width / 2,
+        bullet.y + bullet.height / 2,
+        bullet.width / 2,
+        bullet.height / 2,
+        Math.atan2(bullet.vy, bullet.vx) + Math.PI / 2,
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
     }
     ctx.restore();
   }
@@ -541,24 +652,30 @@ export class SpaceShooterEngine {
   drawEnemy(ctx, enemy) {
     const centerX = enemy.x + enemy.width / 2;
     const centerY = enemy.y + enemy.height / 2;
+    const tilt = clamp(enemy.drift / 160, -0.18, 0.18);
 
     ctx.save();
     ctx.translate(centerX, centerY);
-    ctx.rotate(enemy.rotation);
+    ctx.rotate(tilt);
     ctx.fillStyle = this.playground.colors.enemy;
     ctx.strokeStyle = this.playground.colors.enemyAlt;
     ctx.shadowBlur = 12;
     ctx.shadowColor = this.playground.colors.enemy;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(0, -enemy.height / 2);
-    ctx.lineTo(enemy.width / 2, 0);
-    ctx.lineTo(0, enemy.height / 2);
-    ctx.lineTo(-enemy.width / 2, 0);
+    ctx.moveTo(0, enemy.height / 2);
+    ctx.lineTo(enemy.width / 2, -enemy.height / 2);
+    ctx.lineTo(0, -enemy.height / 3);
+    ctx.lineTo(-enemy.width / 2, -enemy.height / 2);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
+
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#fecdd3";
+    ctx.fillRect(-5, enemy.height / 2 - 8, 10, 9);
     ctx.restore();
+    this.drawHealthBar(ctx, enemy.x, enemy.y + enemy.height + 7, enemy.width, enemy.health / enemy.maxHealth);
   }
 
   drawBoss(ctx, boss) {
@@ -574,11 +691,35 @@ export class SpaceShooterEngine {
     ctx.stroke();
 
     const healthRatio = clamp(boss.health / boss.maxHealth, 0, 1);
+    ctx.restore();
+    this.drawHealthBar(ctx, boss.x, boss.y + boss.height + 8, boss.width, healthRatio);
+  }
+
+  drawHealthBar(ctx, x, y, width, ratio) {
+    const healthRatio = clamp(ratio, 0, 1);
+    const barWidth = Math.max(22, width);
+    const barHeight = 5;
+    const hue = Math.round(healthRatio * 120);
+
+    ctx.save();
     ctx.shadowBlur = 0;
-    ctx.fillStyle = "rgba(15, 23, 42, 0.8)";
-    ctx.fillRect(boss.x, boss.y - 14, boss.width, 6);
-    ctx.fillStyle = "#86efac";
-    ctx.fillRect(boss.x, boss.y - 14, boss.width * healthRatio, 6);
+    ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+    ctx.beginPath();
+    ctx.roundRect(x, y, barWidth, barHeight, 999);
+    ctx.fill();
+
+    if (healthRatio > 0) {
+      ctx.fillStyle = `hsl(${hue}, 85%, 56%)`;
+      ctx.beginPath();
+      ctx.roundRect(x, y, barWidth * healthRatio, barHeight, 999);
+      ctx.fill();
+    }
+
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, barWidth, barHeight, 999);
+    ctx.stroke();
     ctx.restore();
   }
 

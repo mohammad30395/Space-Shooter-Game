@@ -135,6 +135,10 @@ export class SoundSystem {
     this.playTone({ frequency: 980, endFrequency: 1320, duration: 0.055, gain: 0.06, type: "square" });
   }
 
+  enemyShoot() {
+    this.playTone({ frequency: 520, endFrequency: 360, duration: 0.07, gain: 0.035, type: "square" });
+  }
+
   hit() {
     this.playTone({ frequency: 360, endFrequency: 220, duration: 0.075, gain: 0.055, type: "triangle" });
   }
