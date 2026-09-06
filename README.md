@@ -167,4 +167,4 @@ Level 10 includes a boss encounter that can also complete the mission when defea
 
 ## License
 
-No license file is currently included. Add a license before publishing or distributing this project publicly.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
